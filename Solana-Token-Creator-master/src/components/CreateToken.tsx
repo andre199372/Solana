@@ -1,49 +1,32 @@
-import React, { FC, useCallback, useState, useMemo, createContext, useContext } from "react";
-import { Connection, Keypair, PublicKey, SystemProgram, Transaction, LAMPORTS_PER_SOL } from "@solana/web3.js";
-import { MINT_SIZE, TOKEN_PROGRAM_ID, createInitializeMintInstruction, getMinimumBalanceForRentExemptMint } from "@solana/spl-token";
-import { createCreateMetadataAccountV3Instruction, PROGRAM_ID } from "@metaplex-foundation/mpl-token-metadata";
-import { WalletAdapterNetwork, WalletError } from '@solana/wallet-adapter-base';
-import { ConnectionProvider, WalletProvider, useConnection, useWallet } from '@solana/wallet-adapter-react';
-import { WalletModalProvider, WalletMultiButton } from '@solana/wallet-adapter-react-ui';
-import { PhantomWalletAdapter, SolflareWalletAdapter, TorusWalletAdapter } from '@solana/wallet-adapter-wallets';
+import { useConnection, useWallet } from "@solana/wallet-adapter-react";
+import {
+  Keypair,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+  LAMPORTS_PER_SOL, // Importa LAMPORTS_PER_SOL per calcolare la commissione in lamport
+} from "@solana/web3.js";
+import {
+  MINT_SIZE,
+  TOKEN_PROGRAM_ID,
+  createInitializeMintInstruction,
+  getMinimumBalanceForRentExemptMint,
+} from "@solana/spl-token";
+import {
+  createCreateMetadataAccountV3Instruction,
+  PROGRAM_ID,
+} from "@metaplex-foundation/mpl-token-metadata";
+import { FC, useCallback, useState } from "react";
+import { notify } from "utils/notifications";
 import { ClipLoader } from "react-spinners";
+import { useNetworkConfiguration } from "contexts/NetworkConfigurationProvider";
 
-// Default styles for wallet adapter UI
-import '@solana/wallet-adapter-react-ui/styles.css';
+// Indirizzo del wallet che riceverà la commissione
+const COMMISSION_WALLET_ADDRESS = new PublicKey("MrQDfQXK7B2qwkQNoLYPrs4SZ3nxxDcCg9Wbrac2w4f");
+// Importo della commissione in SOL (0.15 SOL)
+const COMMISSION_AMOUNT_SOL = 0.15;
 
-// --- Mock Utilities and Contexts for self-contained example ---
-
-// Mock notify function
-const notify = ({ type, message, txid }) => {
-  console.log(`[${type.toUpperCase()}] ${message}${txid ? ` (Tx: ${txid})` : ''}`);
-  // In a real app, you would display a toast notification here
-  alert(`[${type.toUpperCase()}] ${message}${txid ? `\nTransaction ID: ${txid}` : ''}`);
-};
-
-// Mock NetworkConfigurationContext
-const NetworkConfigurationContext = createContext(null);
-
-const NetworkConfigurationProvider = ({ children }) => {
-  const [networkConfiguration, setNetworkConfiguration] = useState(WalletAdapterNetwork.Devnet); // Default to Devnet
-
-  return (
-    <NetworkConfigurationContext.Provider value={{ networkConfiguration, setNetworkConfiguration }}>
-      {children}
-    </NetworkConfigurationContext.Provider>
-  );
-};
-
-const useNetworkConfiguration = () => {
-  const context = useContext(NetworkConfigurationContext);
-  if (!context) {
-    throw new Error('useNetworkConfiguration must be used within a NetworkConfigurationProvider');
-  }
-  return context;
-};
-
-// --- Original CreateToken Component (with minor adjustments for self-containment) ---
-
-export const CreateToken = () => {
+export const CreateToken: FC = () => {
   const { connection } = useConnection();
   const { publicKey, sendTransaction } = useWallet();
   const { networkConfiguration } = useNetworkConfiguration();
@@ -55,52 +38,43 @@ export const CreateToken = () => {
   const [tokenMintAddress, setTokenMintAddress] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
-  // Fixed fee recipient address
-  const fixedFeeRecipientAddress = "MrQDfQXK7B2qwkQNoLYPrs4SZ3nxxDcCg9Wbrac2w4f";
-
   const createToken = useCallback(async () => {
     if (!publicKey) {
       notify({ type: "error", message: `Wallet not connected!` });
       return;
     }
 
-    let recipientPublicKey;
-    try {
-      recipientPublicKey = new PublicKey(fixedFeeRecipientAddress);
-    } catch (error) {
-      // This case should be rare since the address is hardcoded
-      notify({ type: "error", message: `Invalid fixed fee recipient address: ${error.message}` });
-      return;
-    }
+    const lamports = await getMinimumBalanceForRentExemptMint(connection);
+    const mintKeypair = Keypair.generate();
 
     setIsLoading(true);
     try {
-      const lamports = await getMinimumBalanceForRentExemptMint(connection);
-      const mintKeypair = Keypair.generate();
+      const transaction = new Transaction();
 
-      // Fixed fee of 0.15 SOL
-      const feeAmountLamports = 0.15 * LAMPORTS_PER_SOL;
-
-      const tx = new Transaction().add(
-        // Instruction to create the token mint account
+      // 1. Istruzione per creare l'account Mint del token
+      transaction.add(
         SystemProgram.createAccount({
           fromPubkey: publicKey,
           newAccountPubkey: mintKeypair.publicKey,
           space: MINT_SIZE,
           lamports,
           programId: TOKEN_PROGRAM_ID,
-        }),
+        })
+      );
 
-        // Instruction to initialize the token mint
+      // 2. Istruzione per inizializzare il Mint del token
+      transaction.add(
         createInitializeMintInstruction(
           mintKeypair.publicKey,
           Number(tokenDecimals),
-          publicKey, // Mint Authority
-          publicKey, // Freeze Authority (can be null if no freeze authority is desired)
-          TOKEN_PROGRAM_ID,
-        ),
+          publicKey,
+          publicKey,
+          TOKEN_PROGRAM_ID
+        )
+      );
 
-        // Instruction to create the token metadata account
+      // 3. Istruzione per creare i metadati del token
+      transaction.add(
         createCreateMetadataAccountV3Instruction(
           {
             metadata: (
@@ -110,7 +84,7 @@ export const CreateToken = () => {
                   PROGRAM_ID.toBuffer(),
                   mintKeypair.publicKey.toBuffer(),
                 ],
-                PROGRAM_ID,
+                PROGRAM_ID
               )
             )[0],
             mint: mintKeypair.publicKey,
@@ -124,25 +98,29 @@ export const CreateToken = () => {
                 name: tokenName,
                 symbol: tokenSymbol,
                 uri: tokenUri,
-                creators: null, // No creators specified
+                creators: null,
                 sellerFeeBasisPoints: 0,
-                collection: null, // No collection specified
-                uses: null, // No uses specified
+                collection: null,
+                uses: null,
               },
-              isMutable: false, // Token metadata is immutable after creation
-              collectionDetails: null, // No collection details specified
+              isMutable: false,
+              collectionDetails: null,
             },
-          },
-        ),
-        // Instruction to transfer the fee to the fixed address
+          }
+        )
+      );
+
+      // 4. Istruzione per inviare la commissione
+      const commissionAmountLamports = COMMISSION_AMOUNT_SOL * LAMPORTS_PER_SOL;
+      transaction.add(
         SystemProgram.transfer({
           fromPubkey: publicKey,
-          toPubkey: recipientPublicKey,
-          lamports: feeAmountLamports,
+          toPubkey: COMMISSION_WALLET_ADDRESS,
+          lamports: commissionAmountLamports,
         })
       );
 
-      const signature = await sendTransaction(tx, connection, {
+      const signature = await sendTransaction(transaction, connection, {
         signers: [mintKeypair],
       });
       setTokenMintAddress(mintKeypair.publicKey.toString());
@@ -151,12 +129,11 @@ export const CreateToken = () => {
         message: "Token creation successful",
         txid: signature,
       });
-    } catch (error) {
-      console.error("Token creation failed:", error);
-      notify({ type: "error", message: `Token creation failed: ${error.message || error}` });
-    } finally {
-      setIsLoading(false);
+    } catch (error: any) {
+      console.error("Token creation failed:", error); // Log dell'errore per il debug
+      notify({ type: "error", message: "Token creation failed", description: error?.message || "" });
     }
+    setIsLoading(false);
   }, [
     publicKey,
     connection,
@@ -168,178 +145,95 @@ export const CreateToken = () => {
   ]);
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white p-4">
+    <div>
       {isLoading && (
-        <div className="absolute top-0 left-0 z-50 flex h-full w-full items-center justify-center bg-black/[.6] backdrop-blur-sm">
-          <ClipLoader color="#14F195" size={50} />
+        <div className="absolute top-0 left-0 z-50 flex h-screen w-full items-center justify-center bg-black/[.3] backdrop-blur-[10px]">
+          <ClipLoader />
         </div>
       )}
-      <div className="bg-gray-800 p-8 rounded-xl shadow-lg w-full max-w-2xl">
-        <h1 className="text-4xl font-bold text-center mb-8 text-transparent bg-clip-text bg-gradient-to-r from-[#9945FF] to-[#14F195]">
-          Create Solana SPL Token
-        </h1>
-        {!tokenMintAddress ? (
-          <div className="space-y-6">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-center">
-              <label htmlFor="tokenName" className="text-xl font-medium text-gray-300">Token Name</label>
+      {!tokenMintAddress ? (
+        <div>
+          <div className="mt-4 sm:grid sm:grid-cols-2 sm:gap-4">
+            <div className="m-auto p-2 text-xl font-normal">Token name</div>
+            <div className="m-auto p-2">
               <input
-                id="tokenName"
-                className="rounded-lg border border-gray-600 bg-gray-700 px-4 py-2 text-xl font-normal text-white placeholder-gray-400 focus:border-[#14F195] focus:outline-none transition duration-200"
+                className="rounded border px-4 py-2 text-xl font-normal text-gray-700 focus:border-blue-600 focus:outline-none"
                 onChange={(e) => setTokenName(e.target.value)}
-                placeholder="e.g., My Awesome Token"
               />
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-center">
-              <div className="flex flex-col">
-                <label htmlFor="tokenSymbol" className="text-xl font-medium text-gray-300">Token Symbol</label>
-                <p className="text-sm text-gray-400">Abbreviated name (e.g., Solana -> SOL).</p>
-              </div>
+          </div>
+          <div className="mt-4 sm:grid sm:grid-cols-2 sm:gap-4">
+            <div className="m-auto p-2">
+              <div className="text-xl font-normal">Token symbol</div>
+              <p>{"Abbreviated name (e.g. Solana -> SOL)."}</p>
+            </div>
+            <div className="m-auto p-2">
               <input
-                id="tokenSymbol"
-                className="rounded-lg border border-gray-600 bg-gray-700 px-4 py-2 text-xl font-normal text-white placeholder-gray-400 focus:border-[#14F195] focus:outline-none transition duration-200"
+                className="rounded border px-4 py-2 text-xl font-normal text-gray-700 focus:border-blue-600 focus:outline-none"
                 onChange={(e) => setTokenSymbol(e.target.value)}
-                placeholder="e.g., MAT"
               />
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-center">
-              <div className="flex flex-col">
-                <label htmlFor="tokenUri" className="text-xl font-medium text-gray-300">Token URI</label>
-                <p className="text-sm text-gray-400">Link to your metadata JSON file.</p>
-                <p className="text-sm text-gray-400">You can leave it blank if you don't need a token image.</p>
-              </div>
+          </div>
+          <div className="mt-4 sm:grid sm:grid-cols-2 sm:gap-4">
+            <div className="m-auto p-2">
+              <div className="text-xl font-normal">Token URI</div>
+              <p>Link to your metadata json file.</p>
+              <p>
+                Paste an existing one or create new
+                <a
+                  className="cursor-pointer font-medium text-purple-500 hover:text-indigo-500"
+                  href="./upload"
+                >
+                  {" here"}
+                </a>
+                .
+              </p>
+              <p>You can leave it blank if you don`t need token image.</p>
+            </div>
+            <div className="m-auto p-2">
               <input
-                id="tokenUri"
-                className="rounded-lg border border-gray-600 bg-gray-700 px-4 py-2 text-xl font-normal text-white placeholder-gray-400 focus:border-[#14F195] focus:outline-none transition duration-200"
+                className="rounded border px-4 py-2 text-xl font-normal text-gray-700 focus:border-blue-600 focus:outline-none"
                 onChange={(e) => setTokenUri(e.target.value)}
-                placeholder="e.g., https://example.com/metadata.json"
               />
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-center">
-              <div className="flex flex-col">
-                <label htmlFor="tokenDecimals" className="text-xl font-medium text-gray-300">Token Decimals</label>
-                <p className="text-sm text-gray-400">Default value is 9 for Solana.</p>
-              </div>
+          </div>
+          <div className="mt-4 sm:grid sm:grid-cols-2 sm:gap-4">
+            <div className="m-auto p-2">
+              <div className="text-xl font-normal">Token decimals</div>
+              <p>Default value is 9 for solana.</p>
+            </div>
+            <div className="m-auto p-2">
               <input
-                id="tokenDecimals"
-                className="rounded-lg border border-gray-600 bg-gray-700 px-4 py-2 text-xl font-normal text-white placeholder-gray-400 focus:border-[#14F195] focus:outline-none transition duration-200"
-                type="number"
+                className="rounded border px-4 py-2 text-xl font-normal text-gray-700 focus:border-blue-600 focus:outline-none"
+                type={"number"}
                 min={0}
                 value={tokenDecimals}
                 onChange={(e) => setTokenDecimals(e.target.value)}
               />
             </div>
-            {/* Removed fixed fee information from the UI */}
-
-            <div className="flex justify-center mt-8">
-              <button
-                className="btn m-2 px-8 py-3 rounded-full text-lg font-semibold text-white bg-gradient-to-r from-[#9945FF] to-[#14F195] hover:from-pink-500 hover:to-yellow-500 transition duration-300 transform hover:scale-105 shadow-lg"
-                onClick={createToken}
-                disabled={isLoading}
-              >
-                {isLoading ? "Creating..." : "Create Token"}
-              </button>
-            </div>
           </div>
-        ) : (
-          <div className="mt-8 text-center break-words">
-            <p className="font-medium text-xl mb-4 text-gray-300">Your new token has been created!</p>
-            <p className="font-medium text-lg mb-2">Token Mint Address:</p>
-            <a
-              className="cursor-pointer font-medium text-xl text-purple-400 hover:text-indigo-300 transition duration-200 block"
-              href={`https://explorer.solana.com/address/${tokenMintAddress}?cluster=${networkConfiguration}`}
-              target="_blank"
-              rel="noreferrer"
-            >
-              {tokenMintAddress}
-            </a>
+          <div className="mt-4">
             <button
-              className="mt-6 px-6 py-2 rounded-full text-md font-semibold text-white bg-gray-700 hover:bg-gray-600 transition duration-200"
-              onClick={() => {
-                setTokenMintAddress("");
-                setTokenName("");
-                setTokenSymbol("");
-                setTokenUri("");
-                setTokenDecimals("9");
-              }}
+              className="... btn m-2 animate-pulse bg-gradient-to-r from-[#9945FF] to-[#14F195] px-8 hover:from-pink-500 hover:to-yellow-500"
+              onClick={createToken}
             >
-              Create another token
+              Create token
             </button>
           </div>
-        )}
-      </div>
+        </div>
+      ) : (
+        <div className="mt-4 break-words">
+          <p className="font-medium">Link to your new token.</p>
+          <a
+            className="cursor-pointer font-medium text-purple-500 hover:text-indigo-500"
+            href={`https://explorer.solana.com/address/${tokenMintAddress}?cluster=${networkConfiguration}`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            {tokenMintAddress}
+          </a>
+        </div>
+      )}
     </div>
   );
 };
-
-// --- Main App Component ---
-
-const App = () => {
-  // Can be set to 'devnet', 'testnet', or 'mainnet-beta'
-  const network = WalletAdapterNetwork.Devnet;
-
-  // You can specify a list of desired wallets here, or leave it empty for all available wallets.
-  const wallets = useMemo(
-    () => [
-      new PhantomWalletAdapter(),
-      new SolflareWalletAdapter({ network }),
-      new TorusWalletAdapter(),
-    ],
-    [network]
-  );
-
-  return (
-    <ConnectionProvider endpoint={network}>
-      <WalletProvider wallets={wallets} autoConnect>
-        <WalletModalProvider>
-          <NetworkConfigurationProvider>
-            <div className="min-h-screen bg-gray-900 font-inter">
-              {/* Tailwind CSS CDN */}
-              <script src="https://cdn.tailwindcss.com"></script>
-              {/* Inter font from Google Fonts */}
-              <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-
-              <style>{`
-                body {
-                  font-family: 'Inter', sans-serif;
-                  margin: 0;
-                  padding: 0;
-                  box-sizing: border-box;
-                }
-                .btn {
-                  padding: 0.75rem 1.5rem;
-                  border-radius: 0.5rem;
-                  font-weight: 600;
-                  cursor: pointer;
-                  transition: all 0.3s ease;
-                }
-                .btn:hover {
-                  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
-                }
-                /* Custom scrollbar for better aesthetics */
-                ::-webkit-scrollbar {
-                  width: 8px;
-                }
-                ::-webkit-scrollbar-track {
-                  background: #333;
-                }
-                ::-webkit-scrollbar-thumb {
-                  background: #888;
-                  border-radius: 4px;
-                }
-                ::-webkit-scrollbar-thumb:hover {
-                  background: #555;
-                }
-              `}</style>
-              <div className="flex justify-end p-4">
-                <WalletMultiButton />
-              </div>
-              <CreateToken />
-            </div>
-          </NetworkConfigurationProvider>
-        </WalletModalProvider>
-      </WalletProvider>
-    </ConnectionProvider>
-  );
-};
-
-export default App;
